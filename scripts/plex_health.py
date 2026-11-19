@@ -15,7 +15,11 @@ Reports go to <project>\\reports\\.
 
   python plex_health.py check
   python plex_health.py missing [--library Chinese | --library ?] [--only "Japanese\\Samurai"]
-  python plex_health.py trash
+  python plex_health.py trash [--library Chinese --yes]
+  python plex_health.py scan [--library Chinese] [--no-wait]
+
+  scan      Ask Plex to scan a library (or all) for new, changed and removed files and wait until it is
+            done; refuses a library whose folder can't be reached (a scan then drops every film).
 """
 
 import argparse
@@ -247,9 +251,159 @@ def cmd_missing(args) -> int:
     return 0
 
 
+# ─── scan (update a library) ──────────────────────────────────────────────────
+
+def section_info() -> list:
+    """[{id, name, roots, items, trash}] for every library (read-only database)."""
+    conn = cfg.connect_ro()
+    out = []
+    for s in conn.execute("SELECT id, name FROM library_sections ORDER BY name").fetchall():
+        roots = [r[0] for r in conn.execute("SELECT root_path FROM section_locations WHERE library_section_id=?",
+                                            (s["id"],))]
+        items = conn.execute("SELECT COUNT(*) FROM metadata_items WHERE library_section_id=? AND metadata_type "
+                             "IN (1, 2, 8, 9) AND deleted_at IS NULL", (s["id"],)).fetchone()[0]
+        trash = conn.execute("SELECT COUNT(*) FROM metadata_items WHERE library_section_id=? AND metadata_type "
+                             "IN (1, 2, 4, 8, 9, 10) AND deleted_at IS NOT NULL", (s["id"],)).fetchone()[0]
+        out.append(dict(id=s["id"], name=s["name"], roots=roots, items=items, trash=trash))
+    conn.close()
+    return out
+
+
+def chosen(name: str) -> list:
+    """Libraries for a --library value: '' / 'all' / 'All libraries' = every one, else name (or part of it)."""
+    libs = section_info()
+    if not name or name.lower() in ("all", "all libraries"):
+        return libs
+    hits = [s for s in libs if s["name"].lower() == name.lower()] or \
+           [s for s in libs if name.lower() in s["name"].lower()]
+    if len(hits) != 1:
+        print(f"[!] '{name}' matches {len(hits)} libraries: {', '.join(s['name'] for s in hits) or '-'}")
+        return []
+    return hits
+
+
+def unreachable(sec: dict) -> list:
+    """Library folders Windows can't open right now. Scanning (or emptying the trash) then would make Plex
+    drop every film in them - so both refuse."""
+    out = []
+    for r in sec["roots"]:
+        p = cfg.openable(r)
+        if os.path.isdir(p):
+            continue
+        share = "\\".join(p.split("\\")[:4]) if p.startswith("\\\\") else p[:3]
+        if not os.path.isdir(share):
+            out.append(r)        # the NAS share itself is off - its films would wrongly count as gone
+        else:
+            print(f"  [i] {sec['name']}: folder {r} no longer exists (the share is fine) - "
+                  "remove it from the library in Plex if it is not needed")
+    return out
+
+
+def refreshing() -> set:
+    """Ids of the libraries Plex is scanning right now."""
+    mc = cfg.plex_request("GET", "/library/sections")
+    return {int(d["key"]) for d in mc.get("Directory", []) if d.get("refreshing")}
+
+
+def cmd_scan(args) -> int:
+    import time
+    libs = chosen(args.library)
+    if not libs:
+        return 1
+    if not cfg.plex_running():
+        print("[!] Plex is not running - start it first.")
+        return 1
+    started = []
+    for s in libs:
+        bad = unreachable(s)
+        if bad:
+            print(f"  [!] {s['name']}: NOT scanned - folder not reachable: {', '.join(bad)} "
+                  "(NAS off? A scan now would mark every film in it as gone)")
+            continue
+        cfg.plex_request("GET", f"/library/sections/{s['id']}/refresh")
+        print(f"  [+] {s['name']}: Plex is scanning ({s['items']:,} items before)")
+        started.append(s)
+    if not started or args.no_wait:
+        return 0
+    print("\nWaiting for Plex to finish (Stop is safe - the scan carries on in Plex) …", flush=True)
+    t0 = time.time()
+    time.sleep(5)
+    while True:
+        busy = refreshing() & {s["id"] for s in started}
+        if not busy:
+            break
+        mins = (time.time() - t0) / 60
+        print(f"  still scanning after {mins:.0f} min: "
+              f"{', '.join(s['name'] for s in started if s['id'] in busy)}", flush=True)
+        time.sleep(30)
+    time.sleep(10)   # Plex writes its last rows
+    after = {s["id"]: s for s in section_info()}
+    print(f"\nScan finished after {(time.time() - t0) / 60:.1f} min.")
+    for s in started:
+        a = after.get(s["id"], s)
+        print(f"  {s['name']}: {a['items']:,} items ({a['items'] - s['items']:+,}), "
+              f"in trash (file gone): {a['trash']:,}")
+    if any(after[s["id"]]["trash"] for s in started if s["id"] in after):
+        print("\nItems in trash have no file on the NAS any more. Check them first ('Find dead links'), "
+              "then 'Empty trash' removes them (and their watch history) from Plex.")
+    return 0
+
+
 # ─── trash ────────────────────────────────────────────────────────────────────
 
-def cmd_trash(_args) -> int:
+def trash_with_files(section_id: int) -> list:
+    """Items in a library's trash that still have a video file on disk (title, year, existing file).
+    Plex marks such an item deleted when ONE of its files is gone (e.g. the old SD copy after an HD replace,
+    or while a scan is still running); emptying the trash then could drop a film that still plays."""
+    conn = cfg.connect_ro()
+    rows = conn.execute("""SELECT md.id, md.title, md.year, mp.file FROM metadata_items md
+        JOIN media_items mi ON mi.metadata_item_id = md.id JOIN media_parts mp ON mp.media_item_id = mi.id
+        WHERE md.library_section_id = ? AND md.deleted_at IS NOT NULL AND mp.file != ''""",
+                        (section_id,)).fetchall()
+    conn.close()
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        ok = list(pool.map(lambda r: os.path.exists(cfg.openable(r["file"])), rows))
+    seen, out = set(), []
+    for r, e in zip(rows, ok):
+        if e and r["id"] not in seen:
+            seen.add(r["id"])
+            out.append((r["title"], r["year"], r["file"]))
+    return out
+
+
+def cmd_trash(args) -> int:
+    if args.library:   # one library (or all) chosen in the window, already confirmed there with --yes
+        libs = [s for s in chosen(args.library) if s["trash"]]
+        if not libs:
+            print("Nothing in the trash for that choice.")
+            return 0
+        if not cfg.plex_running():
+            print("[!] Plex is not running - start it first.")
+            return 1
+        busy = refreshing()
+        for s in libs:
+            bad = unreachable(s)
+            if bad:
+                print(f"  [!] {s['name']}: NOT emptied - folder not reachable: {', '.join(bad)} "
+                      "(the 'gone' films may only be offline)")
+                continue
+            if s["id"] in busy:
+                print(f"  [!] {s['name']}: NOT emptied - Plex is still scanning it; try again when it is done")
+                continue
+            alive = trash_with_files(s["id"])
+            if alive:
+                print(f"  [!] {s['name']}: NOT emptied - {len(alive)} of its {s['trash']} trash item(s) still have "
+                      "a file that plays (only an old copy is gone), e.g.:")
+                for t, y, f in alive[:5]:
+                    print(f"        {t} ({y or '?'})  {f}")
+                print("      Fix: in Plex open such a film > ⋯ > 'Refresh Metadata' (or run 'Update library' "
+                      "again); emptying now could remove films you still have.")
+                continue
+            if not args.yes and not confirm(f"Empty trash in {s['name']} ({s['trash']} items)?"):
+                continue
+            cfg.plex_request("PUT", f"/library/sections/{s['id']}/emptyTrash")
+            print(f"  [+] {s['name']}: Plex is removing {s['trash']} item(s) whose file is gone")
+        return 0
     conn = cfg.connect_ro()
     rows = conn.execute("""
         SELECT ls.id, ls.name, COUNT(md.id) AS n
@@ -297,9 +451,14 @@ def main():
     m = sub.add_parser("missing", help="files in Plex that are gone from disk (read-only report)")
     m.add_argument("--only", default="", help="only paths containing this, e.g. \"Japanese\\Samurai\" or a full V:\\ path")
     m.add_argument("--library", default="", help="only this Plex library (name, part of it, or ? to choose)")
-    sub.add_parser("trash", help="show Plex's trash and empty it via the Plex API (asks first)")
+    t = sub.add_parser("trash", help="show Plex's trash and empty it via the Plex API (asks first)")
+    t.add_argument("--library", default="", help="empty only this library ('all' = every library with trash)")
+    t.add_argument("--yes", action="store_true", help="already confirmed (the window asks first)")
+    s = sub.add_parser("scan", help="ask Plex to scan a library for new/changed/removed files")
+    s.add_argument("--library", default="all", help="library name (or part of it); 'all' = every library")
+    s.add_argument("--no-wait", action="store_true", help="don't wait for Plex to finish")
     a = p.parse_args()
-    sys.exit({"check": cmd_check, "missing": cmd_missing, "trash": cmd_trash}[a.command](a))
+    sys.exit({"check": cmd_check, "missing": cmd_missing, "trash": cmd_trash, "scan": cmd_scan}[a.command](a))
 
 
 if __name__ == "__main__":

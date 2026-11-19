@@ -125,20 +125,25 @@ class App(tk.Tk):
                                                                                      pady=(10, 2))
         ttk.Label(df, style="Muted.TLabel", text="Everything as before, in a console").grid(
             row=2, column=1, sticky="w", padx=6, pady=(10, 2))
-        ttk.Button(df, text="▸ Find dead links", width=24, command=self.dead_links).grid(
-            row=3, column=0, sticky="w", pady=(10, 2))
-        dl = ttk.Frame(df)
-        dl.grid(row=3, column=1, sticky="w", padx=6, pady=(10, 2))
+        # one library pick list for the three library tools below (owner, 19 Nov 2026)
+        ttk.Label(df, text="Library:").grid(row=3, column=0, sticky="e", pady=(12, 2))
         try:
             import plex_health
             libs = ["All libraries"] + [n for _, n in plex_health.libraries()]
         except Exception:  # noqa: BLE001 - no Plex database on this PC
             libs = ["All libraries"]
-        self.dead_lib = ttk.Combobox(dl, values=libs, state="readonly", width=24)
+        self.dead_lib = ttk.Combobox(df, values=libs, state="readonly", width=28)
         self.dead_lib.set(libs[0])
-        self.dead_lib.pack(side="left")
-        ttk.Label(dl, style="Muted.TLabel", text=" films and subtitles whose file is gone (read-only)").pack(
-            side="left")
+        self.dead_lib.grid(row=3, column=1, sticky="w", padx=6, pady=(12, 2))
+        for i, (text, cmd, note, style) in enumerate((
+                ("▸ Update library (scan)", self.scan_lib, "Plex looks for new, changed and removed files; "
+                 "waits until done", "Accent.TButton"),
+                ("▸ Find dead links", self.dead_links, "Films and subtitles whose file is gone (read-only)",
+                 "TButton"),
+                ("▸ Empty trash", self.empty_trash, "Removes films whose file is gone from Plex (asks first)",
+                 "Warn.TButton")), 4):
+            ttk.Button(df, text=text, width=24, style=style, command=cmd).grid(row=i, column=0, sticky="w", pady=2)
+            ttk.Label(df, style="Muted.TLabel", text=note).grid(row=i, column=1, sticky="w", padx=6)
 
         # -- output
         lw = ttk.Frame(self, padding=(10, 4, 10, 0))
@@ -250,6 +255,35 @@ class App(tk.Tk):
         lib = self.dead_lib.get()
         args = ["missing"] + (["--library", lib] if lib and lib != "All libraries" else [])
         self.run("plex_health.py", args, f"Dead links - {lib}")
+
+    def scan_lib(self):
+        lib = self.dead_lib.get() or "All libraries"
+        self.run("plex_health.py", ["scan", "--library", "all" if lib == "All libraries" else lib],
+                 f"Update library (scan) - {lib}")
+
+    def empty_trash(self):
+        import plex_health
+        lib = self.dead_lib.get() or "All libraries"
+        try:
+            secs = [s for s in plex_health.chosen("all" if lib == "All libraries" else lib) if s["trash"]]
+        except Exception as e:  # noqa: BLE001
+            messagebox.showerror("Empty trash", f"Could not read the Plex database:\n{e}")
+            return
+        if not secs:
+            messagebox.showinfo("Empty trash", f"Nothing in the trash for {lib}.\n\n(Run 'Update library' first "
+                                               "if you just removed files.)")
+            return
+        lines = "\n".join(f"  {s['name']}: {s['trash']} item(s)" for s in secs)
+        if not messagebox.askokcancel(
+                "Empty trash",
+                f"Plex will remove these items whose file is gone from the NAS:\n\n{lines}\n\n"
+                "Their watch history and any changes you made to them (posters, titles) are lost.\n"
+                "Skipped (with the reason shown): libraries whose folder can't be reached, libraries Plex is "
+                "still scanning, and libraries where a film in the trash still has a file that plays.\n\n"
+                "Tip: 'Find dead links' lists them first.\n\nEmpty the trash?", icon="warning"):
+            return
+        self.run("plex_health.py", ["trash", "--library", "all" if lib == "All libraries" else lib, "--yes"],
+                 f"Empty trash - {lib}")
 
     # ---------------------------------------------------------------- tools in their own window
     def console(self, title, command):
