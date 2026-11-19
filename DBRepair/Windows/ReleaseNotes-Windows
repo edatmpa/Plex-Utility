@@ -1,0 +1,33 @@
+# DBRepair-Windows
+
+Release notes for the Windows counterpart to DBRepair.sh (DBRepair-Windows.ps1)
+
+# Release Info
+
+v1.01.02
+  - Remove `statistics_bandwidth` pruning, as it's now part of PMS 1.41.8
+  - Change `quit` to 98 and `exit` to 99
+  - Minor logging refactoring
+
+v1.01.01
+  - Add `staticstics_bandwidth` pruning during automatic repair.
+
+v1.01.00
+  - Rename this tool to be compliant with Plex inc. Trademark Policy.
+
+v1.00.02
+  - Check whether PMS is running at more points in the process.
+  - Don't remove temp files in scripted mode if the last operation failed.
+  - Better export process that improves upon the UTF-8 fix in v1.00.01.
+
+v1.00.01
+  - Bug Fix: Ensure UTF-8 characters get exported/imported properly.
+
+v1.00.00
+  - Initial Windows PowerShell script release, aiming to provide a similar experience as DBRepair.sh, with command-name-based input.
+  - Initial command support:
+    - AUTO(matic)
+    - EXIT
+    - PRUN(e)
+    - STAR(t)
+    - STOP

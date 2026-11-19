@@ -1,0 +1,31 @@
+{
+  "api_key_path": "C:\\keys\\deepseek.txt",
+  "deepseek_base_url": "https://api.deepseek.com",
+  "deepseek_model": "deepseek-chat",
+  "default_language": "auto",
+  "enable_imdb": true,
+  "imdb_min_score": 0.6,
+  "plexrename_folder": "E:\\PlexRename",
+  "video_extensions": [
+    ".mp4",
+    ".avi",
+    ".mkv",
+    ".mov",
+    ".flv",
+    ".wmv",
+    ".m4v",
+    ".ts",
+    ".mts",
+    ".m2ts",
+    ".webm",
+    ".mpg",
+    ".mpeg",
+    ".vob",
+    ".3gp",
+    ".ogv",
+    ".rm",
+    ".rmvb",
+    ".divx",
+    ".asf"
+  ]
+}
