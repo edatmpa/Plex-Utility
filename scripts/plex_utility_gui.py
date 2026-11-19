@@ -273,13 +273,19 @@ class App(tk.Tk):
             messagebox.showinfo("Empty trash", f"Nothing in the trash for {lib}.\n\n(Run 'Update library' first "
                                                "if you just removed files.)")
             return
-        lines = "\n".join(f"  {s['name']}: {s['trash']} item(s)" for s in secs)
+        parts = []
+        for s in secs:
+            whole, versions = plex_health.trash_summary(s["id"])
+            parts.append(f"  {s['name']}: {whole} film(s) with no file left, {versions} old version(s)")
+        lines = "\n".join(parts)
         if not messagebox.askokcancel(
                 "Empty trash",
-                f"Plex will remove these items whose file is gone from the NAS:\n\n{lines}\n\n"
-                "Their watch history and any changes you made to them (posters, titles) are lost.\n"
+                f"Plex will remove what is gone from the NAS:\n\n{lines}\n\n"
+                "Films with no file left disappear from Plex with their watch history and your changes "
+                "(posters, titles). Old versions (e.g. the SD file after an HD replace) are only taken off "
+                "their film; the film keeps playing its other file.\n"
                 "Skipped (with the reason shown): libraries whose folder can't be reached, libraries Plex is "
-                "still scanning, and libraries where a film in the trash still has a file that plays.\n\n"
+                "still scanning, and libraries where Plex counts a file as gone that is still on the NAS.\n\n"
                 "Tip: 'Find dead links' lists them first.\n\nEmpty the trash?", icon="warning"):
             return
         self.run("plex_health.py", ["trash", "--library", "all" if lib == "All libraries" else lib, "--yes"],

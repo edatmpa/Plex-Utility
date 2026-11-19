@@ -352,13 +352,14 @@ def cmd_scan(args) -> int:
 # ─── trash ────────────────────────────────────────────────────────────────────
 
 def trash_with_files(section_id: int) -> list:
-    """Items in a library's trash that still have a video file on disk (title, year, existing file).
-    Plex marks such an item deleted when ONE of its files is gone (e.g. the old SD copy after an HD replace,
-    or while a scan is still running); emptying the trash then could drop a film that still plays."""
+    """Versions in a library's trash whose file EXISTS (title, year, file) - Plex wrongly thinks they are gone
+    (NAS hiccup during a scan, scan still running). Emptying the trash then would drop real films, so it is
+    refused. (Normal case: Plex marks only the gone version, e.g. the old SD file after an HD replace; emptying
+    removes that version and the film keeps its other file.)"""
     conn = cfg.connect_ro()
-    rows = conn.execute("""SELECT md.id, md.title, md.year, mp.file FROM metadata_items md
-        JOIN media_items mi ON mi.metadata_item_id = md.id JOIN media_parts mp ON mp.media_item_id = mi.id
-        WHERE md.library_section_id = ? AND md.deleted_at IS NOT NULL AND mp.file != ''""",
+    rows = conn.execute("""SELECT md.id, md.title, md.year, mp.file FROM media_items mi
+        JOIN metadata_items md ON md.id = mi.metadata_item_id JOIN media_parts mp ON mp.media_item_id = mi.id
+        WHERE mi.library_section_id = ? AND mi.deleted_at IS NOT NULL AND mp.file != ''""",
                         (section_id,)).fetchall()
     conn.close()
     with ThreadPoolExecutor(max_workers=16) as pool:
@@ -369,6 +370,20 @@ def trash_with_files(section_id: int) -> list:
             seen.add(r["id"])
             out.append((r["title"], r["year"], r["file"]))
     return out
+
+
+def trash_summary(section_id: int) -> tuple:
+    """(films with no version left = removed from Plex completely, old versions removed from films that keep
+    another file) for a library's trash."""
+    conn = cfg.connect_ro()
+    whole = conn.execute("""SELECT COUNT(*) FROM metadata_items md WHERE md.library_section_id = ?
+        AND md.deleted_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM media_items mi
+        WHERE mi.metadata_item_id = md.id AND mi.deleted_at IS NULL)""", (section_id,)).fetchone()[0]
+    versions = conn.execute("""SELECT COUNT(*) FROM media_items mi WHERE mi.library_section_id = ?
+        AND mi.deleted_at IS NOT NULL AND EXISTS (SELECT 1 FROM media_items m2
+        WHERE m2.metadata_item_id = mi.metadata_item_id AND m2.deleted_at IS NULL)""", (section_id,)).fetchone()[0]
+    conn.close()
+    return whole, versions
 
 
 def cmd_trash(args) -> int:
@@ -392,17 +407,18 @@ def cmd_trash(args) -> int:
                 continue
             alive = trash_with_files(s["id"])
             if alive:
-                print(f"  [!] {s['name']}: NOT emptied - {len(alive)} of its {s['trash']} trash item(s) still have "
-                      "a file that plays (only an old copy is gone), e.g.:")
+                print(f"  [!] {s['name']}: NOT emptied - Plex counts {len(alive)} file(s) as gone that ARE on the "
+                      "NAS (a NAS hiccup during a scan?), e.g.:")
                 for t, y, f in alive[:5]:
                     print(f"        {t} ({y or '?'})  {f}")
-                print("      Fix: in Plex open such a film > ⋯ > 'Refresh Metadata' (or run 'Update library' "
-                      "again); emptying now could remove films you still have.")
+                print("      Fix: run 'Update library' again (NAS on), then try again.")
                 continue
-            if not args.yes and not confirm(f"Empty trash in {s['name']} ({s['trash']} items)?"):
+            whole, versions = trash_summary(s["id"])
+            if not args.yes and not confirm(f"Empty trash in {s['name']} ({whole} films, {versions} old versions)?"):
                 continue
             cfg.plex_request("PUT", f"/library/sections/{s['id']}/emptyTrash")
-            print(f"  [+] {s['name']}: Plex is removing {s['trash']} item(s) whose file is gone")
+            print(f"  [+] {s['name']}: Plex is removing {whole} film(s) with no file left and {versions} old "
+                  "version(s) of films that keep another file")
         return 0
     conn = cfg.connect_ro()
     rows = conn.execute("""
